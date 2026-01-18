@@ -1,32 +1,87 @@
 export async function onRequestPost(context) {
   try {
-    const request = context.request;
-    const formData = await request.formData();
+    const req = context.request;
 
-    const file = formData.get("file");
-    if (!file) {
-      return new Response(
-        JSON.stringify({ error: "No file uploaded" }),
-        { status: 400, headers: { "Content-Type": "application/json" } }
-      );
+    // 必须是 multipart/form-data
+    const contentType = req.headers.get("content-type") || "";
+    if (!contentType.includes("multipart/form-data")) {
+      return json({
+        ok: false,
+        error: "Invalid content-type, expected multipart/form-data",
+      }, 400);
     }
 
-    // 先不真正解析 PDF
-    // 只是把文件名 & 类型返回，验证链路
-    const text = `文件名：${file.name}
-文件类型：${file.type}
+    const form = await req.formData();
+    const file = form.get("file");
 
-（Worker 后端已接通，下一步可加 PDF 解析）`;
+    if (!file || typeof file === "string") {
+      return json({
+        ok: false,
+        error: "No file uploaded",
+      }, 400);
+    }
 
-    return new Response(
-      JSON.stringify({ text }),
-      { status: 200, headers: { "Content-Type": "application/json" } }
-    );
+    const name = (file.name || "").toLowerCase();
+
+    // ----------------------------
+    // TXT：直接可解析
+    // ----------------------------
+    if (name.endsWith(".txt")) {
+      const text = await file.text();
+      return json({
+        ok: true,
+        text: normalize(text),
+        source: "txt",
+      });
+    }
+
+    // ----------------------------
+    // PDF / DOCX：Worker 不支持原生解析
+    // ----------------------------
+    if (name.endsWith(".pdf") || name.endsWith(".docx")) {
+      return json({
+        ok: false,
+        error:
+          "PDF/DOCX parsing is not supported in Cloudflare Workers.\n" +
+          "This file may be a scanned document or requires a Node backend.\n\n" +
+          "Suggestion:\n" +
+          "1) Convert PDF/DOCX to TXT locally\n" +
+          "2) Or add a Node backend later (Render / Railway / VPS)\n" +
+          "3) Or integrate OCR / external API",
+      });
+    }
+
+    return json({
+      ok: false,
+      error: "Unsupported file type",
+    }, 400);
 
   } catch (err) {
-    return new Response(
-      JSON.stringify({ error: err.message }),
-      { status: 500, headers: { "Content-Type": "application/json" } }
-    );
+    return json({
+      ok: false,
+      error: err?.message || String(err),
+    }, 500);
   }
+}
+
+// ----------------------------
+// helpers
+// ----------------------------
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: {
+      "content-type": "application/json; charset=utf-8",
+    },
+  });
+}
+
+function normalize(text) {
+  return (text || "")
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
