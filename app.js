@@ -1,10 +1,7 @@
-/* IELTS 点读器 - STATIC v4.3
+/* IELTS 点读器 - STATIC v4.2 (force no-sw)
    - TXT: 本地读取
-   - PDF/DOCX: 上传到本机后端 /api/parse 解析
-   - 单击单词：读单词
-   - 双击单词：读该单词所在整句
-   - 长按单词（移动端好用）：读该单词所在整句
-   - 点击句子空白处：读整句
+   - PDF/DOCX: 上传到后端 /api/parse 解析（需配置后端域名）
+   - 点击单词读单词；点击句子空白读整句
 */
 
 const $ = (id)=>document.getElementById(id);
@@ -24,7 +21,72 @@ let voices = [];
 let currentEl = null;
 
 // ----------------------------
-// Service Worker: hard disable (避免老缓存)
+// Backend API base (for public deploy)
+// ----------------------------
+// Local dev:
+//   - keep empty -> use same-origin /api/parse (http://localhost:xxxx)
+// Cloudflare Pages / any static host:
+//   - set to your backend base (Render/Railway/VPS), e.g.
+//     localStorage.setItem('IELTS_API_BASE','https://xxxx.onrender.com')
+//     then refresh.
+//   - or add query param: ?api=https://xxxx.onrender.com
+const API_BASE_LS_KEY = "IELTS_API_BASE";
+
+function isLocalhostHost(){
+  return /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/i.test(location.hostname);
+}
+
+function readApiBaseFromUrl(){
+  // Support setting backend via URL:
+  //   - ?api=...  or ?apiBase=...
+  //   - #api=...  or #apiBase=...
+  try{
+    const u = new URL(location.href);
+    const q = u.searchParams.get("api") || u.searchParams.get("apiBase");
+    if (q) return q.replace(/\/$/, "");
+
+    const hash = (u.hash || "").replace(/^#/, "");
+    const params = new URLSearchParams(hash);
+    const h = params.get("api") || params.get("apiBase");
+    if (h) return h.replace(/\/$/, "");
+  }catch(_e){}
+  return "";
+}
+
+function resolveApiBase(){
+  const fromUrl = readApiBaseFromUrl();
+  if (fromUrl){
+    try{ localStorage.setItem(API_BASE_LS_KEY, fromUrl); }catch(_e){}
+    return fromUrl;
+  }
+  try{
+    return (localStorage.getItem(API_BASE_LS_KEY) || "").replace(/\/$/, "");
+  }catch(_e){
+    return "";
+  }
+}
+
+function ensureApiBaseConfiguredOrThrow(){
+  const apiBase = resolveApiBase();
+  if (!apiBase && !isLocalhostHost()){
+    const msg = [
+      "未配置后端地址：当前是静态站点域名（非 localhost），但 PDF/DOCX 解析需要后端。",
+      "",
+      "✅ 解决办法（任选其一）：",
+      "1) 在浏览器控制台执行：",
+      "   localStorage.setItem('" + API_BASE_LS_KEY + "','https://<你的Render域名>'); 然后刷新",
+      "2) 或在网址后面加参数：?api=https://<你的Render域名>",
+      "",
+      "（例如：https://ielts-click-reader-frontend.pages.dev/?api=https://xxxx.onrender.com）"
+    ].join("\n");
+    throw new Error(msg);
+  }
+  // Local dev: allow empty (use same-origin)
+  return apiBase;
+}
+
+// ----------------------------
+// Service Worker: hard disable
 // ----------------------------
 (async function hardDisableSW(){
   try{
@@ -85,11 +147,7 @@ function speak(text, targetEl=null){
     return;
   }
   const t = (text||"").trim();
-  if (!t) return;
-
-  // iOS/PWA 有时需要先 “触发一次” 才稳定：这里做个温和兜底
-  try { window.speechSynthesis.resume && window.speechSynthesis.resume(); } catch(_){}
-
+  if (!t){ return; }
   const u = new SpeechSynthesisUtterance(t);
   const lang = elAccent.value;
   u.lang = lang;
@@ -100,7 +158,7 @@ function speak(text, targetEl=null){
   currentEl = targetEl;
   if (currentEl) currentEl.classList.add("playing");
 
-  setStatus(`朗读中：${t.length>40 ? (t.slice(0,40)+"…") : t}`);
+  setStatus(`朗读中：${t.length>40? t.slice(0,40)+"…" : t}`);
   window.speechSynthesis.speak(u);
 
   u.onend = ()=>{
@@ -121,12 +179,7 @@ function speak(text, targetEl=null){
 const WORD_RE = /[A-Za-z]+(?:[-'][A-Za-z]+)*/g;
 
 function escapeHtml(s){
-  return s
-    .replace(/&/g,"&amp;")
-    .replace(/</g,"&lt;")
-    .replace(/>/g,"&gt;")
-    .replace(/\"/g,"&quot;")
-    .replace(/'/g,"&#39;");
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/\"/g,"&quot;").replace(/'/g,"&#39;");
 }
 
 function splitSentences(text){
@@ -168,26 +221,29 @@ function renderClickable(text){
 // Parse helpers
 // ----------------------------
 async function parseByBackend(file){
-  const fd = new FormData();
-  fd.append("file", file);
+  const apiBase = ensureApiBaseConfiguredOrThrow();
+  const url = (apiBase ? apiBase : "") + "/api/parse";
 
-  setStatus(`上传并解析：${file.name} ...`);
-  const res = await fetch("/api/parse", {
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+
+  const r = await fetch(url, {
     method: "POST",
     body: fd,
-    cache: "no-store",
+    mode: apiBase ? "cors" : "same-origin",
   });
 
-  if (!res.ok){
-    const t = await res.text().catch(()=>"");
-    throw new Error(`后端解析失败：HTTP ${res.status} ${t}`);
+  // Cloudflare Pages 上如果误走到同源 /api/parse，常见就是 405/404
+  if (!r.ok){
+    let text = "";
+    try{ text = await r.text(); }catch(_){ /* ignore */ }
+    throw new Error(`后端解析失败：HTTP ${r.status}${text ? "\n"+text.slice(0,400) : ""}`);
   }
-
-  const data = await res.json();
-  if (!data || typeof data.text !== "string"){
-    throw new Error("后端返回格式不对（需要 {text: ...}）");
+  const data = await r.json();
+  if (!data.ok){
+    throw new Error(data.error || "后端返回 ok=false");
   }
-  return data.text;
+  return data.text || "";
 }
 
 async function readTxtFile(file){
@@ -195,6 +251,7 @@ async function readTxtFile(file){
 }
 
 function normalizeText(t){
+  // 保留换行，但去掉太多空白
   return (t||"")
     .replace(/\u00a0/g," ")
     .replace(/\r\n/g,"\n")
@@ -216,6 +273,7 @@ elGen.addEventListener("click", async ()=>{
   try{
     stopSpeak();
 
+    // 1) 优先用粘贴文本
     const pasted = (elText.value||"").trim();
     const f = elFile.files && elFile.files.length ? elFile.files[0] : null;
 
@@ -225,6 +283,7 @@ elGen.addEventListener("click", async ()=>{
     }
 
     let text = "";
+
     if (pasted){
       setStatus("读取粘贴文本...");
       text = pasted;
@@ -249,7 +308,7 @@ elGen.addEventListener("click", async ()=>{
     }
 
     renderClickable(text);
-    setStatus("已生成：单击单词读单词｜双击/长按单词读整句｜点句子空白读整句");
+    setStatus("已生成，点击朗读");
 
   } catch (e){
     console.error(e);
@@ -258,84 +317,27 @@ elGen.addEventListener("click", async ()=>{
   }
 });
 
-// ----------------------------
-// Click / Double-click / Long-press to speak
-// ----------------------------
-function findSentenceNode(node){
-  let cur = node;
-  while (cur && cur !== elPaper){
-    if (cur.classList && cur.classList.contains("s")) return cur;
-    cur = cur.parentNode;
-  }
-  return null;
-}
-
-let longPressTimer = null;
-let longPressed = false;
-
-function clearLongPress(){
-  if (longPressTimer){
-    clearTimeout(longPressTimer);
-    longPressTimer = null;
-  }
-}
-
-elPaper.addEventListener("touchstart", (ev)=>{
-  // 长按单词读整句（移动端重点）
-  const target = ev.target;
-  if (!target || !(target.classList && target.classList.contains("w"))) return;
-
-  longPressed = false;
-  clearLongPress();
-
-  longPressTimer = setTimeout(()=>{
-    const sNode = findSentenceNode(target);
-    if (sNode){
-      const s = sNode.dataset.s || "";
-      longPressed = true;
-      speak(s, sNode);
-    }
-  }, 450);
-}, {passive:true});
-
-elPaper.addEventListener("touchend", ()=>{
-  clearLongPress();
-}, {passive:true});
-
-elPaper.addEventListener("touchcancel", ()=>{
-  clearLongPress();
-}, {passive:true});
-
+// Click-to-speak
 elPaper.addEventListener("click", (ev)=>{
   const target = ev.target;
   if (!target) return;
 
-  // 如果刚刚触发过长按，就不要再执行“单击读单词”
-  if (longPressed){
-    longPressed = false;
-    return;
-  }
-
-  // 点单词：单击读单词；双击读整句
+  // 单词
   if (target.classList && target.classList.contains("w")){
-    const clickCount = ev.detail || 1;
-    if (clickCount >= 2){
-      const sNode = findSentenceNode(target);
-      const s = sNode ? (sNode.dataset.s || "") : "";
-      if (s) speak(s, sNode || target);
-      else speak(target.dataset.w || "", target);
-      return;
-    }
     const w = target.dataset.w || "";
     speak(w, target);
     return;
   }
 
-  // 点句子空白处：读整句
-  const sNode = findSentenceNode(target);
-  if (sNode){
-    const s = sNode.dataset.s || "";
-    speak(s, sNode);
+  // 句子：点击句子容器空白处 或 非单词文本
+  let node = target;
+  while (node && node !== elPaper){
+    if (node.classList && node.classList.contains("s")){
+      const s = node.dataset.s || "";
+      speak(s, node);
+      return;
+    }
+    node = node.parentNode;
   }
 });
 
@@ -345,6 +347,6 @@ if (typeof speechSynthesis !== "undefined"){
   speechSynthesis.onvoiceschanged = ()=> setupVoices();
 }
 
-// iOS first interaction hint
+// First interaction hint for iOS
 document.addEventListener("touchstart", ()=>{}, {passive:true});
 setStatus("就绪（选择文件→生成点读）");
