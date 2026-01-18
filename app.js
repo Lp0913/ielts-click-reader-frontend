@@ -1,6 +1,7 @@
-/* IELTS 点读器 - STATIC v4.2 (force no-sw)
+/* IELTS 点读器 - STATIC v4.3 (pages functions first)
    - TXT: 本地读取
-   - PDF/DOCX: 上传到后端 /api/parse 解析（需配置后端域名）
+   - PDF/DOCX: 优先走同源 /api/parse（Cloudflare Pages Functions）
+              若同源不可用，再允许配置外部后端 API_BASE
    - 点击单词读单词；点击句子空白读整句
 */
 
@@ -21,25 +22,15 @@ let voices = [];
 let currentEl = null;
 
 // ----------------------------
-// Backend API base (for public deploy)
+// Backend API base (optional)
 // ----------------------------
-// Local dev:
-//   - keep empty -> use same-origin /api/parse (http://localhost:xxxx)
-// Cloudflare Pages / any static host:
-//   - set to your backend base (Render/Railway/VPS), e.g.
-//     localStorage.setItem('IELTS_API_BASE','https://xxxx.onrender.com')
-//     then refresh.
-//   - or add query param: ?api=https://xxxx.onrender.com
+// ✅ 推荐：Cloudflare Pages Functions（同源 /api/parse），无需配置任何域名。
+// 可选：你也可以配置外部后端（Render/Railway/VPS）
+//   localStorage.setItem('IELTS_API_BASE','https://xxxx.onrender.com'); 然后刷新
+// 或：网址参数 ?api=https://xxxx.onrender.com
 const API_BASE_LS_KEY = "IELTS_API_BASE";
 
-function isLocalhostHost(){
-  return /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/i.test(location.hostname);
-}
-
 function readApiBaseFromUrl(){
-  // Support setting backend via URL:
-  //   - ?api=...  or ?apiBase=...
-  //   - #api=...  or #apiBase=...
   try{
     const u = new URL(location.href);
     const q = u.searchParams.get("api") || u.searchParams.get("apiBase");
@@ -64,25 +55,6 @@ function resolveApiBase(){
   }catch(_e){
     return "";
   }
-}
-
-function ensureApiBaseConfiguredOrThrow(){
-  const apiBase = resolveApiBase();
-  if (!apiBase && !isLocalhostHost()){
-    const msg = [
-      "未配置后端地址：当前是静态站点域名（非 localhost），但 PDF/DOCX 解析需要后端。",
-      "",
-      "✅ 解决办法（任选其一）：",
-      "1) 在浏览器控制台执行：",
-      "   localStorage.setItem('" + API_BASE_LS_KEY + "','https://<你的Render域名>'); 然后刷新",
-      "2) 或在网址后面加参数：?api=https://<你的Render域名>",
-      "",
-      "（例如：https://ielts-click-reader-frontend.pages.dev/?api=https://xxxx.onrender.com）"
-    ].join("\n");
-    throw new Error(msg);
-  }
-  // Local dev: allow empty (use same-origin)
-  return apiBase;
 }
 
 // ----------------------------
@@ -220,25 +192,56 @@ function renderClickable(text){
 // ----------------------------
 // Parse helpers
 // ----------------------------
-async function parseByBackend(file){
-  const apiBase = ensureApiBaseConfiguredOrThrow();
-  const url = (apiBase ? apiBase : "") + "/api/parse";
-
-  const fd = new FormData();
-  fd.append("file", file, file.name);
-
+async function fetchParse(url, fd, mode){
   const r = await fetch(url, {
     method: "POST",
     body: fd,
-    mode: apiBase ? "cors" : "same-origin",
+    mode,
   });
+  return r;
+}
 
-  // Cloudflare Pages 上如果误走到同源 /api/parse，常见就是 405/404
+function buildBackendHintMessage(){
+  const msg = [
+    "PDF/DOCX 解析接口不可用：同源 /api/parse 没跑起来（或返回 404/405）。",
+    "",
+    "✅ 解决办法（任选其一）：",
+    "A) 推荐：在 Cloudflare Pages 项目里部署 Functions：functions/api/parse.js",
+    "   部署成功后：直接用 /api/parse，不需要任何配置。",
+    "",
+    "B) 或者：配置外部后端（Render/Railway/VPS）",
+    "1) 控制台执行：",
+    "   localStorage.setItem('" + API_BASE_LS_KEY + "','https://<你的后端域名>'); 然后刷新",
+    "2) 或在网址后面加参数：?api=https://<你的后端域名>",
+  ].join("\n");
+  return msg;
+}
+
+async function parseByBackend(file){
+  const apiBase = resolveApiBase(); // 允许为空
+  const fd = new FormData();
+  fd.append("file", file, file.name);
+
+  // 1) 优先同源（Cloudflare Pages Functions）
+  const sameOriginUrl = "/api/parse";
+  let r = await fetchParse(sameOriginUrl, fd, "same-origin");
+
+  // 2) 如果同源不可用，再尝试外部后端（如果配置了）
+  if (!r.ok && (r.status === 404 || r.status === 405) && apiBase){
+    const url2 = apiBase + "/api/parse";
+    r = await fetchParse(url2, fd, "cors");
+  }
+
   if (!r.ok){
+    // 如果同源 404/405 且没配置 apiBase -> 给明确提示
+    if ((r.status === 404 || r.status === 405) && !apiBase){
+      throw new Error(buildBackendHintMessage());
+    }
     let text = "";
     try{ text = await r.text(); }catch(_){ /* ignore */ }
     throw new Error(`后端解析失败：HTTP ${r.status}${text ? "\n"+text.slice(0,400) : ""}`);
   }
+
   const data = await r.json();
   if (!data.ok){
     throw new Error(data.error || "后端返回 ok=false");
@@ -293,6 +296,7 @@ elGen.addEventListener("click", async ()=>{
         setStatus(`读取 TXT：${f.name} ...`);
         text = await readTxtFile(f);
       } else if (name.endsWith(".pdf") || name.endsWith(".docx")){
+        setStatus(`解析文件：${f.name} ...`);
         text = await parseByBackend(f);
       } else {
         alert("仅支持：TXT / PDF / DOCX");
