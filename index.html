@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>IELTS 点读器</title>
+  <meta name="theme-color" content="#0b0d12" />
+  <link rel="manifest" href="/manifest.webmanifest?v=42" />
+  <link rel="icon" href="/icons/icon-192.png" />
+  <link rel="stylesheet" href="/styles.css?v=42" />
+</head>
+<body>
+  <header class="top">
+    <div class="wrap">
+      <div class="brand">
+        <div class="title">IELTS 点读器</div>
+        <div class="subtitle">点单词读单词｜点句子读整句（PDF/DOCX 走本地后端解析）</div>
+      </div>
+      <div class="badge">STATIC v4.2 ✅（强制去缓存 / 不注册SW）</div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <section class="card">
+      <div class="row">
+        <label class="label">粘贴文本 / 上传文件（TXT / PDF / DOCX）</label>
+        <div class="hint">提示：如果点“生成点读”没反应，先看下方【状态】。</div>
+      </div>
+
+      <textarea id="text" placeholder="把雅思材料粘贴到这里…（也可以上传 PDF/DOCX/TXT）"></textarea>
+
+      <div class="controls">
+        <input id="file" type="file" accept=".txt,.pdf,.docx" />
+        <button id="btnGen" class="primary">生成点读</button>
+        <button id="btnStop" class="danger">停止</button>
+      </div>
+
+      <div class="controls2">
+        <select id="accent">
+          <option value="en-GB" selected>英音优先（en-GB）</option>
+          <option value="en-US">美音优先（en-US）</option>
+        </select>
+        <select id="rate">
+          <option value="0.85">语速 0.85x</option>
+          <option value="0.9">语速 0.9x</option>
+          <option value="1.0" selected>语速 1.0x</option>
+          <option value="1.1">语速 1.1x</option>
+          <option value="1.2">语速 1.2x</option>
+        </select>
+        <select id="voice"></select>
+      </div>
+
+      <div class="status" id="status">状态：就绪</div>
+    </section>
+
+    <section class="card">
+      <div class="row">
+        <label class="label">生成后的内容（点击朗读）</label>
+        <div class="hint">点击单词：读单词｜点击句子空白处：读整句</div>
+      </div>
+      <div id="paper" class="paper">（还没有生成内容）</div>
+    </section>
+
+    <footer class="foot">
+      <div>如果 PDF 解析结果为空：这份 PDF 可能是【扫描版/图片】没有文字层，需要 OCR（下一步可加）。</div>
+    </footer>
+  </main>
+
+  <script src="/app.js?v=42"></script>
+</body>
+</html>
