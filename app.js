@@ -1,11 +1,8 @@
-```javascript
-// IELTS Click-Reader PWA - app.js
-// - Paste text or upload TXT/PDF/DOCX
-// - Render click-to-speak word & sentence
-// - PDF: pdf.js (browser text-layer extraction)
-// - DOCX: mammoth (browser)
-// - Optional fallback: external Node backend (?api=... or localStorage IELTS_API_BASE)
-//   Local-first: if running on http://localhost, default to same-origin backend (/api/parse)
+// IELTS Click-Reader PWA - app.js (patched)
+// - Errors are shown in UI (status + paper), not only alert
+// - Better UX: disable button while generating
+// - Clear guidance for https(frontend) + http(localhost backend) Mixed Content
+// - Local-first: if opened on http://localhost, default backend is same-origin (/api/parse)
 
 "use strict";
 
@@ -24,6 +21,21 @@ const elRate = document.getElementById("rateSelect");
 
 function setStatus(s){
   if (elStatus) elStatus.textContent = s;
+}
+
+function showError(msg){
+  setStatus("失败");
+  if (elPaper){
+    elPaper.textContent = msg || "发生错误";
+  }
+  // 仍然保留控制台，方便你定位
+  console.error(msg);
+}
+
+function setBusy(busy){
+  if (!elGen) return;
+  elGen.disabled = !!busy;
+  elGen.textContent = busy ? "生成中..." : "生成点读";
 }
 
 // ----------------------------
@@ -54,8 +66,9 @@ function speak(text, highlightEl){
   stopSpeak();
 
   const utter = new SpeechSynthesisUtterance(text);
+
+  const voices = (typeof speechSynthesis !== "undefined") ? speechSynthesis.getVoices() : [];
   const voiceIndex = parseInt(elVoice?.value || "0", 10);
-  const voices = speechSynthesis.getVoices();
   if (voices && voices.length && !Number.isNaN(voiceIndex) && voices[voiceIndex]){
     utter.voice = voices[voiceIndex];
   }
@@ -76,7 +89,7 @@ function speak(text, highlightEl){
   };
   utter.onerror = ()=>{
     clearHighlight();
-    setStatus("朗读失败");
+    setStatus("朗读失败（浏览器TTS可能被限制）");
   };
 
   currentUtter = utter;
@@ -84,8 +97,9 @@ function speak(text, highlightEl){
 }
 
 function setupVoices(){
+  if (typeof speechSynthesis === "undefined" || !elVoice) return;
+
   const voices = speechSynthesis.getVoices() || [];
-  if (!elVoice) return;
   elVoice.innerHTML = "";
 
   voices.forEach((v, i)=>{
@@ -140,9 +154,10 @@ function tokenizeWords(sentence){
 }
 
 function renderClickable(text){
+  if (!elPaper) return;
   elPaper.innerHTML = "";
-  const sentences = splitSentences(text);
 
+  const sentences = splitSentences(text);
   sentences.forEach((s)=>{
     const sEl = document.createElement("div");
     sEl.className = "s";
@@ -184,10 +199,9 @@ function getApiBase(){
   let base = (q || ls).replace(/\/$/, "");
   if (base) return base;
 
-  // local dev: default to same-origin backend (avoid extra config)
   const host = (location.hostname || "").toLowerCase();
   const isLocal = (host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0");
-  if (isLocal) return ""; // same origin
+  if (isLocal) return ""; // same origin -> /api/parse
 
   return ""; // no backend
 }
@@ -202,11 +216,11 @@ function isHttpUrl(u){
 
 function explainMixedContent(apiBase){
   return (
-    "当前前端是 https 页面，但你配置的是 http 后端（例如 http://localhost）。\n" +
-    "浏览器会拦截这种请求（Mixed Content）。\n\n" +
-    "✅ 解决办法（二选一）：\n" +
-    "1) 把前端也放本地跑（http://localhost 打开前端），然后后端 http://localhost 就能用。\n" +
-    "2) 把后端部署成 https 域名（云服务器/平台），再用 ?api=https://你的后端域名。\n\n" +
+    "❌ 你现在前端是 https 页面，但后端配置的是 http（例如 http://localhost:8787）。\n" +
+    "浏览器会拦截这种请求（Mixed Content），所以你点【生成点读】就像“没反应”。\n\n" +
+    "✅ 解决办法（选一个就行）：\n" +
+    "A) 本地跑前端：用 http://localhost 打开前端，再请求 http://localhost:8787 就不会被拦。\n" +
+    "B) 把后端部署成 https 域名（云平台/反向代理），再用 ?api=https://你的后端域名。\n\n" +
     `你当前 apiBase = ${apiBase}`
   );
 }
@@ -276,7 +290,6 @@ async function parseDocxInBrowser(file){
 // External / Local backend parsing
 // ----------------------------
 async function parseByExternalBackend(file, apiBase){
-  // mixed content guard
   if (isHttpsPage() && apiBase && isHttpUrl(apiBase)){
     throw new Error(explainMixedContent(apiBase));
   }
@@ -296,8 +309,6 @@ async function parseByExternalBackend(file, apiBase){
     return data.text || "";
   }
 
-  // When apiBase == "" -> same-origin:
-  // try /api/parse then /parse
   const base = (apiBase || "").replace(/\/$/, "");
   const candidates = [];
   if (!base){
@@ -336,7 +347,6 @@ function normalizeText(t){
 
 async function parseDocument(file){
   const apiBase = getApiBase();
-
   const name = (file.name || "").toLowerCase();
   const ext = name.split(".").pop();
 
@@ -360,7 +370,6 @@ async function parseDocument(file){
       return normalizeText(await parseByExternalBackend(file, apiBase));
     }
 
-    // local same-origin backend (only when host is localhost)
     const host = (location.hostname || "").toLowerCase();
     const isLocal = (host === "localhost" || host === "127.0.0.1" || host === "0.0.0.0");
     if (isLocal){
@@ -369,11 +378,11 @@ async function parseDocument(file){
     }
 
     throw new Error(
-      "PDF 解析失败：这份 PDF 可能是扫描件/图片，没有文字层。\n\n" +
-      "✅ 解决办法（三选一）：\n" +
+      "PDF 解析失败：可能是扫描件/图片PDF，没有文字层。\n\n" +
+      "✅ 解决办法：\n" +
       "1) 先把 PDF 转 TXT 再上传\n" +
-      "2) 部署一个 https Node 后端，然后用 ?api=https://你的后端域名\n" +
-      "3) 把前端也放本地跑（http://localhost 打开前端），再用本地 Node 后端"
+      "2) 本地跑前端（http://localhost 打开前端）+ 本地 Node 后端\n" +
+      "3) 或部署 https Node 后端，然后用 ?api=https://你的后端域名"
     );
   }
 
@@ -385,7 +394,6 @@ async function parseDocument(file){
     t = normalizeText(t);
     if (t && t.length > 5) return t;
 
-    // fallback backend
     if (apiBase !== ""){
       setStatus(`解析 DOCX（后端）：${file.name} ...`);
       return normalizeText(await parseByExternalBackend(file, apiBase));
@@ -400,10 +408,10 @@ async function parseDocument(file){
 
     throw new Error(
       "DOCX 解析失败。\n\n" +
-      "✅ 解决办法（三选一）：\n" +
+      "✅ 解决办法：\n" +
       "1) 换成 TXT 上传\n" +
-      "2) 部署一个 https Node 后端，然后用 ?api=https://你的后端域名\n" +
-      "3) 把前端也放本地跑（http://localhost 打开前端），再用本地 Node 后端"
+      "2) 本地跑前端（http://localhost 打开前端）+ 本地 Node 后端\n" +
+      "3) 或部署 https Node 后端，然后用 ?api=https://你的后端域名"
     );
   }
 
@@ -413,69 +421,78 @@ async function parseDocument(file){
 // ----------------------------
 // UI actions
 // ----------------------------
-elStop.addEventListener("click", ()=>{
-  stopSpeak();
-  setStatus("已停止");
-});
-
-elGen.addEventListener("click", async ()=>{
-  try{
+if (elStop){
+  elStop.addEventListener("click", ()=>{
     stopSpeak();
+    setStatus("已停止");
+  });
+}
 
-    const pasted = (elText.value||"").trim();
-    const f = elFile.files && elFile.files.length ? elFile.files[0] : null;
+if (elGen){
+  elGen.addEventListener("click", async ()=>{
+    setBusy(true);
+    try{
+      stopSpeak();
 
-    if (!pasted && !f){
-      alert("请先：粘贴文本，或选择 TXT/PDF/DOCX 文件。\n\n想用 PDF/DOCX：选择文件后，再点【生成点读】。");
-      return;
+      const pasted = (elText?.value || "").trim();
+      const f = (elFile?.files && elFile.files.length) ? elFile.files[0] : null;
+
+      if (!pasted && !f){
+        showError("请先：粘贴文本，或选择 TXT/PDF/DOCX 文件。\n\n想用 PDF/DOCX：选择文件后，再点【生成点读】。");
+        return;
+      }
+
+      let text = "";
+      if (pasted){
+        setStatus("读取粘贴文本...");
+        text = pasted;
+      } else if (f){
+        text = await parseDocument(f);
+      }
+
+      text = normalizeText(text);
+      if (!text){
+        showError("解析结果为空（可能是扫描版 PDF 没文字层，需要 OCR 或后端解析）");
+        return;
+      }
+
+      renderClickable(text);
+      setStatus("已生成，点击朗读（点单词/点句子空白）");
+
+    } catch (e){
+      const msg = String(e && e.message ? e.message : e);
+      showError(msg);
+    } finally {
+      setBusy(false);
     }
-
-    let text = "";
-    if (pasted){
-      setStatus("读取粘贴文本...");
-      text = pasted;
-    } else if (f){
-      text = await parseDocument(f);
-    }
-
-    text = normalizeText(text);
-    if (!text){
-      setStatus("解析结果为空（可能是扫描版 PDF 没文字层）");
-      elPaper.textContent = "（解析为空：这份 PDF 可能是扫描版/图片，没有文字层，需要 OCR 或后端解析）";
-      return;
-    }
-
-    renderClickable(text);
-    setStatus("已生成，点击朗读");
-
-  } catch (e){
-    console.error(e);
-    alert(String(e && e.message ? e.message : e));
-    setStatus("失败");
-  }
-});
+  });
+}
 
 // Click-to-speak
-elPaper.addEventListener("click", (ev)=>{
-  const target = ev.target;
-  if (!target) return;
+if (elPaper){
+  elPaper.addEventListener("click", (ev)=>{
+    const target = ev.target;
+    if (!target) return;
 
-  if (target.classList && target.classList.contains("w")){
-    const w = target.dataset.w || "";
-    speak(w, target);
-    return;
-  }
-
-  let node = target;
-  while (node && node !== elPaper){
-    if (node.classList && node.classList.contains("s")){
-      const s = node.dataset.s || "";
-      speak(s, node);
+    // word
+    if (target.classList && target.classList.contains("w")){
+      const w = target.dataset.w || "";
+      speak(w, target);
       return;
     }
-    node = node.parentNode;
-  }
-});
+
+    // sentence container
+    let node = target;
+    while (node && node !== elPaper){
+      if (node.classList && node.classList.contains("s")){
+        const s = node.dataset.s || "";
+        speak(s, node);
+        return;
+      }
+      node = node.parentNode;
+    }
+  });
+}
 
 // Voice init
 setupVoices();
@@ -484,5 +501,4 @@ if (typeof speechSynthesis !== "undefined"){
 }
 
 document.addEventListener("touchstart", ()=>{}, {passive:true});
-setStatus("就绪（选择文件→生成点读）");
-```
+setStatus("就绪（选择文件→生成点读 / 或粘贴文本→生成点读）");
